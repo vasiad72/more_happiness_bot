@@ -1,0 +1,158 @@
+import os
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from flask import Flask
+from threading import Thread
+
+# --- Секреты через Replit Secrets ---
+TOKEN = os.environ['TOKEN']
+ADMIN_ID = int(os.environ['ADMIN_ID'])
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+# --- Вариант 1: подбор недвижимости ---
+PICK_QUESTIONS = [
+    ("🏙 Район", ["Дагомыс", "Сочи", "Адлер", "Красная Поляна", "Свой вариант"]),
+    ("🏡 Тип недвижимости", ["Квартира", "Жилое помещение", "Апартаменты", "Дом", "Свой вариант"]),
+    ("🛋 Количество комнат", ["Студия", "1-комнатная", "2-комнатная", "Свой вариант"]),
+    ("💰 Форма оплаты", ["Наличные", "Ипотека", "Свой вариант"]),
+    ("💸 Бюджет", ["До 4 млн", "4-6 млн", "6-8 млн", "8-10 млн", "10-13 млн", "Свой вариант"]),
+    ("🕒 Срок покупки", ["В течение месяца", "В течение полугода", "Просто присматриваюсь", "Свой вариант"]),
+    ("📞 Контакт", ["📱 Передать контакт"])
+]
+
+# --- Вариант 2: конкретное объявление ---
+AD_QUESTIONS = [
+    ("🏡 Раздел объявления", ["Квартиры", "Апартаменты", "ФЗ-214", "Жилые помещения", "Дома", "Свой вариант"]),
+    ("📄 Номер объявления", None),
+    ("💰 Форма оплаты", ["Наличные", "Ипотека", "Свой вариант"]),
+    ("🕒 Срок покупки", ["В течение месяца", "В течение полугода", "Просто присматриваюсь", "Свой вариант"]),
+    ("📞 Контакт", ["📱 Передать контакт"])
+]
+
+THANK_MSG = (
+    "Спасибо! Ваши ответы переданы специалисту — он свяжется с вами в течение 10 минут. 🌊\n"
+    "Мы очень рады, что вы выбираете нашу группу *Море Счастье Бот*! ❤️"
+)
+
+# --- Хранилища ---
+user_data = {}
+user_state = {}
+
+# --- Утилиты ---
+def kb_from_options(options):
+    if not options:
+        return None
+    buttons = [[types.KeyboardButton(text=o)] for o in options]
+    return types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+start_kb = types.ReplyKeyboardMarkup(
+    keyboard=[
+        [types.KeyboardButton(text="Оставить запрос на подбор")],
+        [types.KeyboardButton(text="По конкретному объявлению из группы")]
+    ],
+    resize_keyboard=True
+)
+
+# --- Команды ---
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    user_data[message.from_user.id] = {}
+    user_state[message.from_user.id] = {"flow": None, "step": 0}
+    await message.answer(
+        "Здравствуйте! Я — *Море Счастье Бот* 🌊\n"
+        "Я помогу вам с выбором недвижимости в Сочи.\n"
+        "Выберите, что вас интересует:",
+        parse_mode="Markdown",
+        reply_markup=start_kb
+    )
+
+@dp.message(lambda m: m.text in ["Оставить запрос на подбор", "По конкретному объявлению из группы"])
+async def choose_flow(message: types.Message):
+    user_id = message.from_user.id
+    flow = "pick" if message.text == "Оставить запрос на подбор" else "ad"
+    user_state[user_id] = {"flow": flow, "step": 0}
+    user_data[user_id] = {}
+    await ask_question(message)
+
+async def ask_question(message: types.Message):
+    user_id = message.from_user.id
+    state = user_state[user_id]
+    flow = state["flow"]
+    step = state["step"]
+
+    questions = PICK_QUESTIONS if flow == "pick" else AD_QUESTIONS
+    if step < len(questions):
+        q_text, opts = questions[step]
+        if opts:
+            await message.answer(f"{q_text}?", reply_markup=kb_from_options(opts))
+        else:
+            await message.answer(f"{q_text}?", reply_markup=types.ReplyKeyboardRemove())
+    else:
+        await finalize(message)
+
+@dp.message()
+async def handle_message(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_state or user_state[user_id]["flow"] is None:
+        await start_cmd(message)
+        return
+
+    flow = user_state[user_id]["flow"]
+    step = user_state[user_id]["step"]
+    questions = PICK_QUESTIONS if flow == "pick" else AD_QUESTIONS
+
+    text = message.text.strip() if message.text else ""
+
+    # Контакт — финальный шаг
+    if step == len(questions) - 1:
+        contact = text if text != "📱 Передать контакт" else "Контакт не указан ❌"
+        user_data[user_id]["📞 Контакт"] = contact
+        await forward_to_admin(user_id, message.from_user)
+        await message.answer(THANK_MSG, reply_markup=types.ReplyKeyboardRemove())
+        user_state[user_id] = {"flow": None, "step": 0}
+        return
+
+    q_text, _ = questions[step]
+    user_data[user_id][q_text] = text
+    user_state[user_id]["step"] += 1
+    await ask_question(message)
+
+# --- Отправка админу ---
+async def forward_to_admin(user_id: int, user: types.User):
+    data = user_data[user_id]
+    flow = user_state[user_id].get("flow", "неизвестно")
+
+    msg_lines = [
+        f"📬 *Новая заявка от Море Счастье Бот!*",
+        f"Тип заявки: {'🧭 Подбор недвижимости' if flow == 'pick' else '📌 Конкретное объявление'}\n"
+    ]
+    for k, v in data.items():
+        msg_lines.append(f"{k}: {v}")
+    tg_profile = f"@{user.username}" if user.username else "не указан"
+    msg_lines.append(f"\n👤 Telegram: {tg_profile}")
+    msg_lines.append(f"🆔 ID: {user.id}")
+    msg_lines.append(f"📛 Имя: {user.full_name}")
+
+    msg = "\n".join(msg_lines)
+    await bot.send_message(ADMIN_ID, msg, parse_mode="Markdown")
+
+# --- Web сервер для Replit (чтобы бот не спал) ---
+app = Flask('')
+@app.route('/')
+def home():
+    return "Море Счастье Бот работает 🌊"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+Thread(target=run).start()
+
+# --- Запуск бота ---
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
