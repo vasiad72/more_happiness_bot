@@ -6,8 +6,8 @@ from flask import Flask
 from threading import Thread
 
 # --- Секреты через Replit Secrets ---
-TOKEN = os.environ['TOKEN']
-ADMIN_ID = int(os.environ['ADMIN_ID'])
+TOKEN = os.environ["7986568349:AAFB4TGt6XN9nqh5kZQ50uDdqwjiifNOSyE"]
+ADMIN_ID = int(os.environ['1374465950'])
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
